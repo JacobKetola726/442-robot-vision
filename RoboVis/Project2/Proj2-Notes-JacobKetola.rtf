@@ -1,0 +1,179 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 Robot Vision notes on project 2\
+Part 1:\
+ef nothing(_):\
+    """\
+    createTrackbar requires a callback. We read values in the main loop instead.\
+    """\
+    pass\
+\
+def on_mouse(event, x, y, flags, param):\
+    """\
+    Mouse callback registered with cv.setMouseCallback().\
+    OpenCV calls this function whenever a mouse event happens in the HSV window.\
+    A single pixel is noisy( sensor noise, liighting, shadows), so we examine a square\
+    neighborhood and use its statistics.\
+    """\
+    if event != cv.EVENT_LBUTTONDOWN  or hsv_frame is None:\
+        return\
+\
+while True:\
+        ok, frame = cap.read()\
+        if not ok:\
+            break\
+\
+        -# Light blur reduces pixel noise before color thresholding\
+        blurred = cv.GaussianBlur(frame, (5, 5), 0)\
+\
+        -#BGR -> HSV, HSV seperates color (hue) from intensity (Value), so the object's color is more stable under lighting changes.\
+        hsv_frame = cv.cvtColor(blurred, cv.COLOR_BGR2HSV)\
+\
+        lower, upper, erode_iter, dilate_iter = read_controls()\
+\
+        -#inRange gives 255 (white) where every channel is within [lower, upper], and 0 (black) everywhere else. The result\
+        # is a single-channel binary mask.\
+        mask = cv.inRange(hsv_frame, lower, upper)\
+\
+        -#Morphology\
+        # 1) Erode first: removes small white specks of noise (shrinks white regions)\
+        # 2) Dilate next: grows the surviving object back and fills small holes.\
+        # Erde-then-dilate is called "opening". Dilating more than eroding makes the object slightly more solid\
+        mask = cv.erode(mask, kernel, iterations=erode_iter)\
+        mask = cv.dilate(mask, kernel, iterations=dilate_iter)\
+\
+        -# mark the largest white regiion's center on the original image\
+        display = frame.copy()\
+        contours = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[-2]\
+\
+\
+\
+Part 2:\
+\
+def create_controls():\
+    cv2.namedWindow(WIN_CTRL)\
+    cv2.resizeWindow(WIN_CTRL, 400, 300)\
+    # accumulateWeighted alpha = trackbar / 1000 (default 0.02)\
+    cv2.createTrackbar("Alpha x1000", WIN_CTRL, 20, 200, nothing)\
+    cv2.createTrackbar("Brightness", WIN_CTRL, 20, 100, nothing)\
+    cv2.createTrackbar("Threshold 1", WIN_CTRL, 25, 255, nothing)\
+    cv2.createTrackbar("Threshold 2", WIN_CTRL, 40, 255, nothing)\
+    cv2.createTrackbar("Min area", WIN_CTRL, 1500, 20000, nothing)\
+\
+def preprocess(frame, brightness):\
+    """\
+    Brighten slightly, then blur heavily.\
+    convertScaleAbs computes |alpha*pixel + beta| and saturates to 0-255 (uint8).\
+    Blurring averages out sensor noise and tiny changes, so only larger\
+    regions of real change survive the difference step.\
+    """\
+\
+while True:\
+        ok, frame = cap.read()\
+        if not ok:\
+            break\
+ \
+        alpha, brightness, t1, t2, min_area = read_controls()\
+        processed = preprocess(frame, brightness)\
+ \
+        # Initialize the 32-bit float accumulator on the first frame\
+        # accumulateWeighted requires the accumulator (dst) to be float32 or\
+        # float64 with the same size and channel count as the source.\
+        # Floats are needed because each update adds tiny fractional amounts\
+        # (e.g. 0.02 * pixel). In uint8 those fractions would be rounded away\
+        # and the average would never change smoothly.\
+        if avg is None:\
+            avg = processed.astype(np.float32)   # same as np.float32(processed)\
+            continue\
+ \
+        # Convert the float background back to 8-bit\
+        # convertScaleAbs rounds, takes absolute value, and saturates to uint8,\
+        # giving an image with the same type as the webcam frame.\
+        background = cv2.convertScaleAbs(avg)\
+ \
+        # Difference between current frame and background\
+        # absdiff avoids the wrap-around you'd get from subtracting uint8 values.\
+        diff = cv2.absdiff(processed, background)\
+ \
+        #Update the running average \
+        # avg = (1 - alpha) * avg + alpha * processed\
+        # Small alpha: background adapts slowly (moving things stay "motion" longer).\
+        # Large alpha: background adapts quickly (a still person fades into it fast).\
+        # This update happens after the difference, so the current frame's\
+        # moving object doesn't contaminate the background it's compared to.\
+        cv2.accumulateWeighted(processed, avg, alpha)\
+ \
+        # ---- Grayscale ----\
+        gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)\
+ \
+        # ---- Threshold -> blur -> threshold ----\
+        # First threshold: keep only pixels that changed significantly.\
+\
+        _, binary = cv2.threshold(gray_diff, t1, 255, cv2.THRESH_BINARY)\
+\
+        # Blur: merges nearby white fragments of the same object and softens specks.\
+\
+        binary = cv2.GaussianBlur(binary, (15, 15), 0)\
+\
+        # Second threshold: turn the blurred mask back into pure black/white.\
+\
+        _, binary = cv2.threshold(binary, t2, 255, cv2.THRESH_BINARY)\
+\
+        # Dilate to fill small gaps so one object forms one contour\
+        binary = cv2.dilate(binary, None, iterations=2)\
+ \
+        # ---- Contours ----\
+        # RETR_EXTERNAL: only outer boundaries (we don't care about holes).\
+        # CHAIN_APPROX_SIMPLE: compress straight segments to save memory.\
+        # [-2] makes this work in both OpenCV 3 (3 return values) and 4 (2 values).\
+        contours = cv2.findContours(binary, cv2.RETR_EXTERNAL,\
+                                    cv2.CHAIN_APPROX_SIMPLE)[-2]\
+ \
+        contour_vis = np.zeros_like(frame)\
+        cv2.drawContours(contour_vis, contours, -1, (128, 128, 128), 1)\
+ \
+        output = frame.copy()\
+        significant = 0\
+        for c in contours:\
+            # Reject insignificant contours: noise, flicker, single pixels,\
+            # and small shadow fragments all produce tiny areas.\
+            if cv2.contourArea(c) < min_area:\
+                continue\
+            significant += 1\
+ \
+            cv2.drawContours(contour_vis, [c], -1, (0, 255, 0), 2)\
+ \
+            # Bounding rectangle\
+            x, y, w, h = cv2.boundingRect(c)\
+            cv2.rectangle(output, (x, y), (x + w, y + h), (0, 255, 0), 2)\
+ \
+            # Center using image moments (centroid of the contour area)\
+            M = cv2.moments(c)\
+            if M["m00"] != 0:\
+                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])\
+            else:\
+                cx, cy = x + w // 2, y + h // 2\
+            cv2.circle(output, (cx, cy), 5, (0, 0, 255), -1)\
+            cv2.putText(output, f"(\{cx\},\{cy\})", (cx + 8, cy - 8),\
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)\
+ \
+        cv2.putText(output, f"Moving regions: \{significant\}", (10, 25),\
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)\
+ \
+        cv2.imshow("Motion", output)\
+        cv2.imshow("Background", background)\
+        cv2.imshow("Difference", gray_diff)\
+        cv2.imshow("Binary", binary)\
+        cv2.imshow("Contours", contour_vis)\
+ \
+        key = cv2.waitKey(1) & 0xFF\
+        if key in (ord("q"), 27):\
+            break\
+        if key == ord("r"):\
+            avg = None  # rebuild the background from the next frame\
+ }
